@@ -11,6 +11,8 @@ export interface ApiKey {
   label: string;
   isWorking: boolean;
   errorCount: number;
+  tokenUsage?: number;
+  quotaReached?: boolean;
 }
 
 export interface Chapter {

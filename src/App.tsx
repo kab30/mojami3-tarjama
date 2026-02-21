@@ -139,7 +139,9 @@ export default function App() {
           key: k.key_value || k.key, // Support both just in case
           label: k.label,
           isWorking: k.is_active ?? k.is_working,
-          errorCount: k.error_count || 0
+          errorCount: k.error_count || 0,
+          tokenUsage: k.token_usage || 0,
+          quotaReached: k.quota_reached || false
         })));
       } else {
         const savedKeys = localStorage.getItem('lumina_keys');
@@ -182,7 +184,9 @@ export default function App() {
       id: k.id.includes('-') ? k.id : undefined, // Only send if it looks like a UUID, otherwise let DB generate
       key_value: k.key,
       label: k.label,
-      is_active: k.isWorking
+      is_active: k.isWorking,
+      token_usage: k.tokenUsage,
+      quota_reached: k.quotaReached
     })));
 
     if (error) {
@@ -308,7 +312,7 @@ export default function App() {
     reader.readAsText(file);
   };
 
-  const translateChapter = async (chapter: Chapter, key: string, model: string): Promise<string> => {
+  const translateChapter = async (chapter: Chapter, key: string, model: string): Promise<{text: string, tokens: number}> => {
     const ai = new GoogleGenAI({ apiKey: key });
     const response = await ai.models.generateContent({
       model: model,
@@ -320,7 +324,11 @@ export default function App() {
     if (!response.text) {
       throw new Error("Empty response from model");
     }
-    return response.text;
+
+    // Extract token usage if available
+    const tokens = response.usageMetadata?.totalTokenCount || 0;
+    
+    return { text: response.text, tokens };
   };
 
   const startTranslation = async () => {
@@ -361,10 +369,29 @@ export default function App() {
         const currentKey = keys[currentKeyIndexRef.current];
         const currentModel = config.selectedModels[currentModelIndexRef.current];
 
+        if (currentKey.quotaReached) {
+          currentKeyIndexRef.current = (currentKeyIndexRef.current + 1) % keys.length;
+          attemptCount++;
+          // If we've cycled through all keys, rotate model
+          if (currentKeyIndexRef.current === 0) {
+            currentModelIndexRef.current = (currentModelIndexRef.current + 1) % config.selectedModels.length;
+          }
+          continue;
+        }
+
         try {
           addLog(`Translating "${updatedChapters[i].title}" using ${currentKey.label} and ${currentModel}...`);
-          const translated = await translateChapter(updatedChapters[i], currentKey.key, currentModel);
+          const { text: translated, tokens } = await translateChapter(updatedChapters[i], currentKey.key, currentModel);
           
+          // Update key token usage
+          const updatedKeys = [...keys];
+          const keyIdx = currentKeyIndexRef.current;
+          updatedKeys[keyIdx] = {
+            ...updatedKeys[keyIdx],
+            tokenUsage: (updatedKeys[keyIdx].tokenUsage || 0) + tokens
+          };
+          syncKeys(updatedKeys);
+
           updatedChapters[i].translatedContent = translated;
           updatedChapters[i].status = TranslationStatus.COMPLETED;
           setChapters([...updatedChapters]);
@@ -375,10 +402,19 @@ export default function App() {
           }
           
           success = true;
-          addLog(`Successfully translated "${updatedChapters[i].title}"`, 'success');
+          addLog(`Successfully translated "${updatedChapters[i].title}" (${tokens} tokens)`, 'success');
         } catch (error: any) {
           attemptCount++;
-          addLog(`Error with ${currentKey.label} / ${currentModel}: ${error.message || 'Unknown error'}`, 'error');
+          const isQuotaError = error.message?.includes('429') || error.message?.toLowerCase().includes('quota');
+          
+          if (isQuotaError) {
+            const updatedKeys = [...keys];
+            updatedKeys[currentKeyIndexRef.current].quotaReached = true;
+            syncKeys(updatedKeys);
+            addLog(`Quota reached for ${currentKey.label}. Skipping...`, 'error');
+          } else {
+            addLog(`Error with ${currentKey.label} / ${currentModel}: ${error.message || 'Unknown error'}`, 'error');
+          }
           
           // Rotate key first
           currentKeyIndexRef.current = (currentKeyIndexRef.current + 1) % keys.length;
@@ -424,6 +460,12 @@ export default function App() {
     a.click();
     URL.revokeObjectURL(url);
   };
+
+  const selectedChapters = chapters.filter(c => selectedIds.has(c.id));
+  const completedSelected = selectedChapters.filter(c => c.status === TranslationStatus.COMPLETED).length;
+  const progressPercent = selectedChapters.length > 0 
+    ? Math.round((completedSelected / selectedChapters.length) * 100) 
+    : 0;
 
   return (
     <div className={cn(
@@ -491,9 +533,23 @@ export default function App() {
                 <Key className="w-5 h-5 text-emerald-600" />
                 <h2 className="font-bold text-lg">{t[lang].apiKeys}</h2>
               </div>
-              <span className="text-xs font-mono bg-zinc-100 px-2 py-1 rounded text-zinc-500">
-                {keys.length} {t[lang].active}
-              </span>
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-mono bg-zinc-100 px-2 py-1 rounded text-zinc-500">
+                  {keys.length} {t[lang].active}
+                </span>
+                {keys.some(k => k.quotaReached) && (
+                  <button 
+                    onClick={() => {
+                      const updatedKeys = keys.map(k => ({ ...k, quotaReached: false }));
+                      syncKeys(updatedKeys);
+                      addLog("Quotas reset for all keys", "info");
+                    }}
+                    className="text-[10px] font-bold text-emerald-600 hover:text-emerald-700 uppercase tracking-tight transition-colors"
+                  >
+                    {lang === 'ar' ? "إعادة تعيين" : "Reset"}
+                  </button>
+                )}
+              </div>
             </div>
             
             <div className="space-y-3 mb-6 max-h-48 overflow-y-auto pr-2 custom-scrollbar">
@@ -506,13 +562,25 @@ export default function App() {
                     exit={{ opacity: 0, x: 20 }}
                     className="flex items-center justify-between p-3 bg-zinc-50 rounded-2xl border border-zinc-100 group"
                   >
-                    <div className="flex items-center gap-3">
-                      <div className={cn(
-                        "w-2 h-2 rounded-full",
-                        k.isWorking ? "bg-emerald-500" : "bg-red-500"
-                      )} />
-                      <span className="text-sm font-medium">{k.label}</span>
-                      <span className="text-[10px] text-zinc-400 font-mono">••••{k.key?.slice(-4) || '****'}</span>
+                    <div className="flex flex-col flex-1 min-w-0">
+                      <div className="flex items-center gap-3">
+                        <div className={cn(
+                          "w-2 h-2 rounded-full shrink-0",
+                          k.quotaReached ? "bg-amber-500" : (k.isWorking ? "bg-emerald-500" : "bg-red-500")
+                        )} />
+                        <span className="text-sm font-medium truncate">{k.label}</span>
+                        <span className="text-[10px] text-zinc-400 font-mono shrink-0">••••{k.key?.slice(-4) || '****'}</span>
+                      </div>
+                      <div className="flex items-center gap-2 mt-1">
+                        <span className="text-[9px] font-bold text-zinc-400 uppercase tracking-tighter">
+                          {k.tokenUsage?.toLocaleString() || 0} Tokens
+                        </span>
+                        {k.quotaReached && (
+                          <span className="text-[9px] font-bold text-amber-600 uppercase tracking-tighter bg-amber-50 px-1 rounded">
+                            {lang === 'ar' ? "وصل للحد" : "Limit Reached"}
+                          </span>
+                        )}
+                      </div>
                     </div>
                     <button 
                       onClick={() => removeKey(k.id)}
@@ -728,6 +796,32 @@ export default function App() {
                   <p className="text-3xl font-bold text-zinc-400">{chapters.filter(c => c.status === TranslationStatus.IDLE || c.status === TranslationStatus.FAILED).length}</p>
                 </div>
               </div>
+
+              {/* Progress Bar */}
+              {(isTranslating || progressPercent > 0) && (
+                <div className="bg-white p-6 rounded-3xl border border-zinc-200 shadow-sm">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-2">
+                      <div className={cn(
+                        "w-2 h-2 rounded-full",
+                        isTranslating ? "bg-emerald-500 animate-pulse" : "bg-zinc-300"
+                      )} />
+                      <span className="text-xs font-bold text-zinc-500 uppercase tracking-wider">
+                        {lang === 'ar' ? "تقدم الترجمة" : "Translation Progress"}
+                      </span>
+                    </div>
+                    <span className="text-sm font-bold text-emerald-600">{progressPercent}%</span>
+                  </div>
+                  <div className="w-full h-3 bg-zinc-100 rounded-full overflow-hidden border border-zinc-200/50">
+                    <motion.div 
+                      initial={{ width: 0 }}
+                      animate={{ width: `${progressPercent}%` }}
+                      transition={{ type: "spring", bounce: 0, duration: 0.5 }}
+                      className="h-full bg-emerald-500 shadow-[0_0_10px_rgba(16,185,129,0.3)]"
+                    />
+                  </div>
+                </div>
+              )}
 
               {/* Chapter List */}
               <div className="bg-white rounded-[40px] border border-zinc-200 shadow-sm overflow-hidden flex flex-col h-[700px]">
