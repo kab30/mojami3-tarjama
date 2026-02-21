@@ -15,7 +15,9 @@ import {
   ChevronRight,
   FileText,
   Copy,
-  Download
+  Download,
+  Library,
+  Edit2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI } from "@google/genai";
@@ -34,7 +36,11 @@ export default function App() {
   // State
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [chapters, setChapters] = useState<Chapter[]>([]);
+  const [novels, setNovels] = useState<{id: string, name: string}[]>([]);
   const [novelId, setNovelId] = useState<string | null>(null);
+  const [isLibraryOpen, setIsLibraryOpen] = useState(false);
+  const [editingNovelId, setEditingNovelId] = useState<string | null>(null);
+  const [editingNovelName, setEditingNovelName] = useState("");
   const [config, setConfig] = useState<TranslationConfig>({
     prompt: "Translate the following novel chapter into accurate and literary Arabic. Maintain the original tone, style, and cultural nuances. Ensure the flow is natural for Arabic readers.",
     targetLanguage: "Arabic",
@@ -78,7 +84,13 @@ export default function App() {
       apply: "Apply",
       selected: "Selected",
       all: "All",
-      none: "None"
+      none: "None",
+      library: "Library",
+      selectNovel: "Select Novel",
+      addNovel: "Add to Library",
+      noNovels: "No novels in library",
+      deleteNovel: "Delete Novel",
+      loadNovel: "Load Novel"
     },
     ar: {
       title: "لومينا",
@@ -113,7 +125,13 @@ export default function App() {
       apply: "تطبيق",
       selected: "محدد",
       all: "الكل",
-      none: "لا شيء"
+      none: "لا شيء",
+      library: "المخزن",
+      selectNovel: "اختر رواية",
+      addNovel: "إضافة للمخزن",
+      noNovels: "لا توجد روايات في المخزن",
+      deleteNovel: "حذف الرواية",
+      loadNovel: "تحميل الرواية"
     }
   };
 
@@ -128,7 +146,7 @@ export default function App() {
   const currentModelIndexRef = useRef(0);
   const stopRequestedRef = useRef(false);
 
-  // Load keys and config from Supabase
+  // Load keys, config, and novels from Supabase
   useEffect(() => {
     const fetchData = async () => {
       // Fetch Keys
@@ -158,9 +176,99 @@ export default function App() {
           selectedModels: configData.selected_models
         });
       }
+
+      // Fetch Novels
+      const { data: novelsData, error: novelsError } = await supabase.from('novels').select('*');
+      if (novelsData && !novelsError) {
+        setNovels(novelsData);
+      }
     };
     fetchData();
   }, []);
+
+  const fetchNovels = async () => {
+    const { data, error } = await supabase.from('novels').select('*');
+    if (data && !error) setNovels(data);
+  };
+
+  const loadNovelChapters = async (id: string) => {
+    setNovelId(id);
+    const { data, error } = await supabase.from('chapters')
+      .select('*')
+      .eq('novel_id', id)
+      .order('order_index', { ascending: true });
+    
+    if (data && !error) {
+      const loadedChapters: Chapter[] = data.map((c: any) => ({
+        id: c.id,
+        title: c.title,
+        content: c.content,
+        translatedContent: c.translated_content,
+        status: c.status as TranslationStatus,
+        error: c.error,
+        orderIndex: c.order_index || 0
+      }));
+      setChapters(loadedChapters);
+      setSelectedIds(new Set(loadedChapters.map(c => c.id)));
+      setRangeFrom(1);
+      setRangeTo(Math.min(10, loadedChapters.length));
+      addLog(`Loaded ${loadedChapters.length} chapters from library`, 'info');
+      setIsLibraryOpen(false);
+    }
+  };
+
+  const deleteNovel = async (id: string) => {
+    await supabase.from('chapters').delete().eq('novel_id', id);
+    await supabase.from('novels').delete().eq('id', id);
+    fetchNovels();
+    if (novelId === id) {
+      setChapters([]);
+      setNovelId(null);
+    }
+    addLog("Novel deleted from library", "info");
+  };
+
+  const downloadNovelFromLibrary = async (id: string, name: string) => {
+    addLog(`Fetching translated chapters for "${name}"...`, "info");
+    const { data, error } = await supabase.from('chapters')
+      .select('translated_content')
+      .eq('novel_id', id)
+      .eq('status', TranslationStatus.COMPLETED)
+      .order('order_index', { ascending: true });
+
+    if (error) {
+      addLog(`Error fetching chapters: ${error.message}`, "error");
+      return;
+    }
+
+    if (!data || data.length === 0) {
+      addLog("No translated chapters found for this novel.", "error");
+      return;
+    }
+
+    const content = data
+      .map((c: any) => c.translated_content)
+      .join('\n\n---\n\n');
+    
+    const blob = new Blob([content], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${name}_translated.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+    addLog(`Downloaded ${data.length} translated chapters for "${name}"`, "success");
+  };
+
+  const updateNovelName = async (id: string, newName: string) => {
+    if (!newName.trim()) return;
+    const { error } = await supabase.from('novels').update({ name: newName.trim() }).eq('id', id);
+    if (!error) {
+      fetchNovels();
+      setEditingNovelId(null);
+      addLog("Novel renamed successfully", "success");
+    }
+  };
 
   // Sync config to Supabase
   const saveConfig = async (newConfig: TranslationConfig) => {
@@ -229,7 +337,8 @@ export default function App() {
       content: chapter.content,
       translated_content: chapter.translatedContent,
       status: chapter.status,
-      error: chapter.error
+      error: chapter.error,
+      order_index: chapter.orderIndex
     });
   };
 
@@ -278,7 +387,8 @@ export default function App() {
           id: Math.random().toString(36).substr(2, 9),
           title: title,
           content: trimmed,
-          status: TranslationStatus.IDLE
+          status: TranslationStatus.IDLE,
+          orderIndex: splitChapters.length
         });
       });
 
@@ -290,7 +400,8 @@ export default function App() {
             id: Math.random().toString(36).substr(2, 9),
             title: (lang === 'ar' ? "جزء " : "Part ") + (Math.floor(i / chunkSize) + 1),
             content: text.substring(i, i + chunkSize).trim(),
-            status: TranslationStatus.IDLE
+            status: TranslationStatus.IDLE,
+            orderIndex: Math.floor(i / chunkSize)
           });
         }
       }
@@ -303,6 +414,7 @@ export default function App() {
       setRangeTo(Math.min(10, splitChapters.length));
       
       addLog(`Loaded ${splitChapters.length} chapters from file`, 'info');
+      fetchNovels();
 
       // Sync initial chapters to Supabase
       for (const ch of splitChapters) {
@@ -486,6 +598,13 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-4">
+            <button 
+              onClick={() => setIsLibraryOpen(true)}
+              className="flex items-center gap-2 px-4 py-2 rounded-full bg-zinc-100 text-zinc-600 text-xs font-bold hover:bg-zinc-200 transition-colors"
+            >
+              <Library className="w-4 h-4" />
+              {t[lang].library}
+            </button>
             <button 
               onClick={() => setLang(lang === 'en' ? 'ar' : 'en')}
               className="px-3 py-1.5 rounded-full bg-zinc-100 text-zinc-600 text-xs font-bold hover:bg-zinc-200 transition-colors"
@@ -952,6 +1071,129 @@ export default function App() {
           <span className="uppercase font-bold tracking-widest">{isTranslating ? (lang === 'ar' ? "المحرك يعمل" : "Engine Running") : (lang === 'ar' ? "المحرك متوقف" : "Engine Idle")}</span>
         </div>
       </footer>
+
+      {/* Library Modal */}
+      <AnimatePresence>
+        {isLibraryOpen && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-6">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsLibraryOpen(false)}
+              className="absolute inset-0 bg-zinc-900/60 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative w-full max-w-2xl bg-white rounded-[40px] shadow-2xl overflow-hidden flex flex-col max-h-[80vh]"
+            >
+              <div className="p-8 border-b border-zinc-100 flex items-center justify-between bg-zinc-50/50">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 bg-emerald-600 rounded-2xl flex items-center justify-center shadow-lg shadow-emerald-200">
+                    <Library className="w-5 h-5 text-white" />
+                  </div>
+                  <div>
+                    <h2 className="text-xl font-bold">{t[lang].library}</h2>
+                    <p className="text-xs text-zinc-400 font-medium uppercase tracking-wider">{t[lang].selectNovel}</p>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setIsLibraryOpen(false)}
+                  className="w-10 h-10 rounded-full bg-white border border-zinc-200 flex items-center justify-center hover:bg-zinc-50 transition-colors shadow-sm"
+                >
+                  <Plus className="w-5 h-5 rotate-45 text-zinc-400" />
+                </button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-6 space-y-3 custom-scrollbar">
+                {novels.length === 0 ? (
+                  <div className="text-center py-12 text-zinc-400 italic flex flex-col items-center gap-4">
+                    <FileText className="w-12 h-12 opacity-10" />
+                    <p>{t[lang].noNovels}</p>
+                  </div>
+                ) : (
+                  novels.map((novel) => (
+                    <div 
+                      key={novel.id}
+                      className={cn(
+                        "flex items-center justify-between p-4 rounded-3xl border transition-all group",
+                        novelId === novel.id 
+                          ? "bg-emerald-50 border-emerald-200" 
+                          : "bg-zinc-50 border-zinc-100 hover:border-zinc-200"
+                      )}
+                    >
+                      <div className="flex items-center gap-4">
+                        <div className="w-12 h-12 bg-white rounded-2xl flex items-center justify-center shadow-sm border border-zinc-100">
+                          <FileText className="w-6 h-6 text-zinc-400" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          {editingNovelId === novel.id ? (
+                            <div className="flex items-center gap-2">
+                              <input 
+                                autoFocus
+                                value={editingNovelName}
+                                onChange={(e) => setEditingNovelName(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') updateNovelName(novel.id, editingNovelName);
+                                  if (e.key === 'Escape') setEditingNovelId(null);
+                                }}
+                                className="bg-white border border-emerald-200 rounded-lg px-2 py-1 text-sm font-bold w-full focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
+                              />
+                              <button 
+                                onClick={() => updateNovelName(novel.id, editingNovelName)}
+                                className="p-1 text-emerald-600 hover:bg-emerald-100 rounded"
+                              >
+                                <CheckCircle2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="flex items-center gap-2 group/title">
+                              <h4 className="font-bold text-zinc-900 truncate">{novel.name}</h4>
+                              <button 
+                                onClick={() => {
+                                  setEditingNovelId(novel.id);
+                                  setEditingNovelName(novel.name);
+                                }}
+                                className="opacity-0 group-hover/title:opacity-100 p-1 text-zinc-400 hover:text-emerald-600 transition-all"
+                              >
+                                <Edit2 className="w-3 h-3" />
+                              </button>
+                            </div>
+                          )}
+                          <p className="text-[10px] text-zinc-400 uppercase tracking-widest font-bold">ID: {novel.id}</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button 
+                          onClick={() => downloadNovelFromLibrary(novel.id, novel.name)}
+                          className="p-2.5 bg-white border border-zinc-200 text-zinc-600 rounded-2xl hover:bg-zinc-50 transition-all"
+                          title={t[lang].download}
+                        >
+                          <Download className="w-4 h-4" />
+                        </button>
+                        <button 
+                          onClick={() => loadNovelChapters(novel.id)}
+                          className="px-4 py-2 bg-zinc-900 text-white rounded-2xl text-xs font-bold hover:bg-zinc-800 transition-all"
+                        >
+                          {t[lang].loadNovel}
+                        </button>
+                        <button 
+                          onClick={() => deleteNovel(novel.id)}
+                          className="p-2 text-zinc-400 hover:text-red-500 transition-colors"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* Preview Modal */}
       <AnimatePresence>

@@ -22,6 +22,7 @@ export interface Chapter {
   translatedContent?: string;
   status: TranslationStatus;
   error?: string;
+  orderIndex: number;
 }
 
 export interface TranslationConfig {
