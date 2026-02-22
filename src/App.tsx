@@ -558,16 +558,6 @@ export default function App() {
         const currentKey = keys[currentKeyIndexRef.current];
         const currentModel = config.selectedModels[currentModelIndexRef.current];
 
-        if (currentKey.quotaReached) {
-          currentKeyIndexRef.current = (currentKeyIndexRef.current + 1) % keys.length;
-          attemptCount++;
-          // If we've cycled through all keys, rotate model
-          if (currentKeyIndexRef.current === 0) {
-            currentModelIndexRef.current = (currentModelIndexRef.current + 1) % config.selectedModels.length;
-          }
-          continue;
-        }
-
         try {
           addLog(`Translating "${updatedChapters[i].title}" using ${currentKey.label} and ${currentModel}...`);
           const { text: translated, tokens } = await translateChapter(updatedChapters[i], currentKey.key, currentModel);
@@ -599,21 +589,20 @@ export default function App() {
           const isQuotaError = error.message?.includes('429') || error.message?.toLowerCase().includes('quota');
           
           if (isQuotaError) {
-            const updatedKeys = [...keys];
-            updatedKeys[currentKeyIndexRef.current].quotaReached = true;
-            syncKeys(updatedKeys);
-            addLog(`Quota reached for ${currentKey.label}. Skipping...`, 'error');
+            addLog(`Quota reached for ${currentModel} on ${currentKey.label}. Switching model...`, 'error');
           } else {
             addLog(`Error with ${currentKey.label} / ${currentModel}: ${error.message || 'Unknown error'}`, 'error');
           }
           
-          // Rotate key first
-          currentKeyIndexRef.current = (currentKeyIndexRef.current + 1) % keys.length;
+          // Rotate model first
+          currentModelIndexRef.current = (currentModelIndexRef.current + 1) % config.selectedModels.length;
           
-          // If we've cycled through all keys, rotate model
-          if (currentKeyIndexRef.current === 0) {
-            currentModelIndexRef.current = (currentModelIndexRef.current + 1) % config.selectedModels.length;
-            addLog(`Cycled through all keys. Switching to model: ${config.selectedModels[currentModelIndexRef.current]}`, 'info');
+          // If we've cycled through all models, rotate key
+          if (currentModelIndexRef.current === 0) {
+            currentKeyIndexRef.current = (currentKeyIndexRef.current + 1) % keys.length;
+            if (attemptCount < maxAttempts) {
+              addLog(`Cycled through all models. Switching to key: ${keys[currentKeyIndexRef.current].label}`, 'info');
+            }
           }
         }
       }
