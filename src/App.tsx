@@ -314,6 +314,26 @@ export default function App() {
     setSelectedPreviewChapter(null);
   };
 
+  const deleteChapter = async (chapterId: string) => {
+    if (!confirm("Are you sure you want to delete this chapter?")) return;
+
+    const { error } = await supabase.from('chapters').delete().eq('id', chapterId);
+    
+    if (error) {
+      addLog(`Error deleting chapter: ${error.message}`, "error");
+      return;
+    }
+
+    const updatedChapters = previewChapters.filter(c => c.id !== chapterId);
+    setPreviewChapters(updatedChapters);
+    
+    if (selectedPreviewChapter?.id === chapterId) {
+      setSelectedPreviewChapter(updatedChapters.length > 0 ? updatedChapters[0] : null);
+    }
+    
+    addLog("Chapter deleted successfully", "success");
+  };
+
   // Sync config to Supabase
   const saveConfig = async (newConfig: TranslationConfig) => {
     setConfig(newConfig);
@@ -411,15 +431,28 @@ export default function App() {
       
       parts.forEach((part, index) => {
         const trimmed = part.trim();
-        if (!trimmed || trimmed.length < 5) return; // Skip empty or very short artifacts
+        // Skip if total length is too short (e.g. just a title)
+        if (!trimmed || trimmed.length < 20) return; 
         
-        const lines = trimmed.split(/\r?\n/);
+        const lines = trimmed.split(/\r?\n/).filter(l => l.trim().length > 0);
+        
+        // If only 1 line (the title) or very few lines, check content density
+        if (lines.length < 2) return;
+
         let title = lines[0].trim();
+        
+        // Calculate body content length (excluding title)
+        const bodyContent = lines.slice(1).join('\n').trim();
+        
+        // If body content is too short (e.g. < 50 chars), skip
+        // This handles "Chapter 7" followed by empty space or just a title repetition
+        if (bodyContent.length < 50) return;
         
         // Check if this part actually starts with a marker
         const hasMarker = title.match(/第|[Cc]hapter|#|楔子|番外|序言|正文/);
         
         // If it's the first part and has no marker, it's likely an introduction/metadata
+        // User requested to skip small introductions too, so we rely on the length check above.
         if (index === 0 && !hasMarker) {
           title = lang === 'ar' ? "مقدمة / معلومات" : "Intro / Metadata";
         } else if (title.length > 100) {
@@ -1308,23 +1341,37 @@ export default function App() {
                   </div>
                   <div className="flex-1 overflow-y-auto p-2 custom-scrollbar">
                     {previewChapters.map((chapter) => (
-                      <button
+                      <div
                         key={chapter.id}
-                        onClick={() => setSelectedPreviewChapter(chapter)}
                         className={cn(
-                          "w-full text-left px-4 py-3 rounded-xl text-sm font-medium transition-all mb-1",
+                          "w-full flex items-center justify-between px-4 py-3 rounded-xl text-sm font-medium transition-all mb-1 group",
                           selectedPreviewChapter?.id === chapter.id
                             ? "bg-emerald-100 text-emerald-900 shadow-sm"
                             : "text-zinc-600 hover:bg-zinc-100"
                         )}
                       >
-                        <div className="flex items-center justify-between">
-                          <span className="truncate">{chapter.title}</span>
-                          {chapter.status === TranslationStatus.COMPLETED && (
-                            <CheckCircle2 className="w-3 h-3 text-emerald-500 flex-shrink-0" />
-                          )}
-                        </div>
-                      </button>
+                        <button
+                          onClick={() => setSelectedPreviewChapter(chapter)}
+                          className="flex-1 text-left truncate mr-2 focus:outline-none"
+                        >
+                          <div className="flex items-center gap-2">
+                             <span className="truncate">{chapter.title}</span>
+                             {chapter.status === TranslationStatus.COMPLETED && (
+                               <CheckCircle2 className="w-3 h-3 text-emerald-500 flex-shrink-0" />
+                             )}
+                          </div>
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            deleteChapter(chapter.id);
+                          }}
+                          className="opacity-0 group-hover:opacity-100 p-1.5 text-zinc-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
+                          title="Delete Chapter"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
                     ))}
                   </div>
                 </div>
