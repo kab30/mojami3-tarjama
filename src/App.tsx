@@ -191,8 +191,11 @@ export default function App() {
     if (data && !error) setNovels(data);
   };
 
+  const [sessionTranslatedIds, setSessionTranslatedIds] = useState<Set<string>>(new Set());
+
   const loadNovelChapters = async (id: string) => {
     setNovelId(id);
+    setSessionTranslatedIds(new Set()); // Reset session tracking when loading a novel
     const { data, error } = await supabase.from('chapters')
       .select('*')
       .eq('novel_id', id)
@@ -231,7 +234,7 @@ export default function App() {
   const downloadNovelFromLibrary = async (id: string, name: string) => {
     addLog(`Fetching translated chapters for "${name}"...`, "info");
     const { data, error } = await supabase.from('chapters')
-      .select('translated_content')
+      .select('translated_content, order_index')
       .eq('novel_id', id)
       .eq('status', TranslationStatus.COMPLETED)
       .order('order_index', { ascending: true });
@@ -247,7 +250,7 @@ export default function App() {
     }
 
     const content = data
-      .map((c: any) => c.translated_content)
+      .map((c: any) => `الفصل ${c.order_index + 1}\n\n${c.translated_content}`)
       .join('\n\n---\n\n');
     
     const blob = new Blob([content], { type: 'text/plain' });
@@ -514,6 +517,8 @@ export default function App() {
           }
           
           success = true;
+          // Add to session tracking
+          setSessionTranslatedIds(prev => new Set(prev).add(updatedChapters[i].id));
           addLog(`Successfully translated "${updatedChapters[i].title}" (${tokens} tokens)`, 'success');
         } catch (error: any) {
           attemptCount++;
@@ -559,9 +564,17 @@ export default function App() {
   };
 
   const downloadResults = () => {
-    const content = chapters
-      .filter(c => c.status === TranslationStatus.COMPLETED)
-      .map(c => c.translatedContent) // Only include the translated content
+    const chaptersToDownload = chapters.filter(c => 
+      c.status === TranslationStatus.COMPLETED && sessionTranslatedIds.has(c.id)
+    );
+
+    if (chaptersToDownload.length === 0) {
+      addLog("No new translations to download in this session.", "info");
+      return;
+    }
+
+    const content = chaptersToDownload
+      .map(c => `الفصل ${c.orderIndex + 1}\n\n${c.translatedContent}`)
       .join('\n\n---\n\n');
     
     const blob = new Blob([content], { type: 'text/plain' });
