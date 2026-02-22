@@ -7,6 +7,8 @@ if (!supabaseUrl || !supabaseAnonKey) {
   console.warn("Supabase environment variables are missing. Database features will not work.");
 }
 
+export const isSupabaseConfigured = !!supabaseUrl && !!supabaseAnonKey;
+
 export const supabase = createClient(
   supabaseUrl || 'https://placeholder.supabase.co', 
   supabaseAnonKey || 'placeholder'

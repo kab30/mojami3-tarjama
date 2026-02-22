@@ -17,7 +17,9 @@ import {
   Copy,
   Download,
   Library,
-  Edit2
+  Edit2,
+  Eye,
+  X
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI } from "@google/genai";
@@ -30,7 +32,7 @@ import {
   TranslationConfig, 
   AVAILABLE_MODELS 
 } from './types';
-import { supabase } from './lib/supabase';
+import { supabase, isSupabaseConfigured } from './lib/supabase';
 
 export default function App() {
   // State
@@ -49,6 +51,9 @@ export default function App() {
   });
   const [isTranslating, setIsTranslating] = useState(false);
   const [lang, setLang] = useState<'en' | 'ar'>('en');
+  const [previewNovelId, setPreviewNovelId] = useState<string | null>(null);
+  const [previewChapters, setPreviewChapters] = useState<Chapter[]>([]);
+  const [selectedPreviewChapter, setSelectedPreviewChapter] = useState<Chapter | null>(null);
 
   const t = {
     en: {
@@ -271,6 +276,42 @@ export default function App() {
       setEditingNovelId(null);
       addLog("Novel renamed successfully", "success");
     }
+  };
+
+  const handlePreviewNovel = async (id: string) => {
+    addLog("Loading preview...", "info");
+    const { data, error } = await supabase.from('chapters')
+      .select('*')
+      .eq('novel_id', id)
+      .order('order_index', { ascending: true });
+
+    if (error) {
+      addLog(`Error loading preview: ${error.message}`, "error");
+      return;
+    }
+
+    if (data) {
+      const loadedChapters: Chapter[] = data.map((c: any) => ({
+        id: c.id,
+        title: c.title,
+        content: c.content,
+        translatedContent: c.translated_content,
+        status: c.status as TranslationStatus,
+        error: c.error,
+        orderIndex: c.order_index || 0
+      }));
+      setPreviewChapters(loadedChapters);
+      setPreviewNovelId(id);
+      if (loadedChapters.length > 0) {
+        setSelectedPreviewChapter(loadedChapters[0]);
+      }
+    }
+  };
+
+  const closePreview = () => {
+    setPreviewNovelId(null);
+    setPreviewChapters([]);
+    setSelectedPreviewChapter(null);
   };
 
   // Sync config to Supabase
@@ -599,6 +640,11 @@ export default function App() {
     )} dir={lang === 'ar' ? 'rtl' : 'ltr'}>
       {/* Header */}
       <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-md border-b border-zinc-200 px-6 py-4">
+        {!isSupabaseConfigured && (
+          <div className="absolute top-full left-0 right-0 bg-red-500 text-white text-center py-2 text-xs font-bold">
+            Warning: Database connection not configured. Please add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to your environment variables.
+          </div>
+        )}
         <div className="max-w-7xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 bg-emerald-600 rounded-xl flex items-center justify-center shadow-lg shadow-emerald-200">
@@ -1180,6 +1226,13 @@ export default function App() {
                       </div>
                       <div className="flex items-center gap-2">
                         <button 
+                          onClick={() => handlePreviewNovel(novel.id)}
+                          className="p-2.5 bg-white border border-zinc-200 text-zinc-600 rounded-2xl hover:bg-zinc-50 transition-all"
+                          title="Preview"
+                        >
+                          <Eye className="w-4 h-4" />
+                        </button>
+                        <button 
                           onClick={() => downloadNovelFromLibrary(novel.id, novel.name)}
                           className="p-2.5 bg-white border border-zinc-200 text-zinc-600 rounded-2xl hover:bg-zinc-50 transition-all"
                           title={t[lang].download}
@@ -1202,6 +1255,121 @@ export default function App() {
                     </div>
                   ))
                 )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Preview Modal */}
+      <AnimatePresence>
+        {previewNovelId && (
+          <div className="fixed inset-0 z-[110] flex items-center justify-center p-6">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={closePreview}
+              className="absolute inset-0 bg-zinc-900/80 backdrop-blur-md"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative w-full max-w-6xl h-[90vh] bg-white rounded-[32px] shadow-2xl overflow-hidden flex flex-col"
+            >
+              {/* Header */}
+              <div className="p-6 border-b border-zinc-100 flex items-center justify-between bg-zinc-50">
+                <div className="flex items-center gap-4">
+                  <div className="w-10 h-10 bg-emerald-600 rounded-xl flex items-center justify-center shadow-lg shadow-emerald-200">
+                    <Eye className="w-5 h-5 text-white" />
+                  </div>
+                  <div>
+                    <h2 className="text-xl font-bold">Novel Preview</h2>
+                    <p className="text-xs text-zinc-400 font-medium uppercase tracking-wider">
+                      {novels.find(n => n.id === previewNovelId)?.name || 'Unknown Novel'}
+                    </p>
+                  </div>
+                </div>
+                <button 
+                  onClick={closePreview}
+                  className="w-10 h-10 rounded-full bg-white border border-zinc-200 flex items-center justify-center hover:bg-zinc-50 transition-colors"
+                >
+                  <X className="w-5 h-5 text-zinc-400" />
+                </button>
+              </div>
+
+              {/* Content */}
+              <div className="flex flex-1 overflow-hidden">
+                {/* Sidebar - Chapter List */}
+                <div className="w-80 border-r border-zinc-100 bg-zinc-50/50 flex flex-col">
+                  <div className="p-4 border-b border-zinc-100">
+                    <h3 className="text-xs font-bold text-zinc-400 uppercase tracking-wider">Chapters ({previewChapters.length})</h3>
+                  </div>
+                  <div className="flex-1 overflow-y-auto p-2 custom-scrollbar">
+                    {previewChapters.map((chapter) => (
+                      <button
+                        key={chapter.id}
+                        onClick={() => setSelectedPreviewChapter(chapter)}
+                        className={cn(
+                          "w-full text-left px-4 py-3 rounded-xl text-sm font-medium transition-all mb-1",
+                          selectedPreviewChapter?.id === chapter.id
+                            ? "bg-emerald-100 text-emerald-900 shadow-sm"
+                            : "text-zinc-600 hover:bg-zinc-100"
+                        )}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="truncate">{chapter.title}</span>
+                          {chapter.status === TranslationStatus.COMPLETED && (
+                            <CheckCircle2 className="w-3 h-3 text-emerald-500 flex-shrink-0" />
+                          )}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Main Content Area */}
+                <div className="flex-1 overflow-y-auto bg-white custom-scrollbar">
+                  {selectedPreviewChapter ? (
+                    <div className="grid grid-cols-2 h-full divide-x divide-zinc-100">
+                      {/* Original Content */}
+                      <div className="p-8 overflow-y-auto custom-scrollbar">
+                        <div className="sticky top-0 bg-white/90 backdrop-blur pb-4 mb-4 border-b border-zinc-100 z-10">
+                          <h3 className="text-sm font-bold text-zinc-400 uppercase tracking-wider flex items-center gap-2">
+                            <FileText className="w-4 h-4" /> Original Text
+                          </h3>
+                        </div>
+                        <div className="prose prose-sm max-w-none text-zinc-600 whitespace-pre-wrap font-mono leading-relaxed">
+                          {selectedPreviewChapter.content}
+                        </div>
+                      </div>
+
+                      {/* Translated Content */}
+                      <div className="p-8 overflow-y-auto custom-scrollbar bg-zinc-50/30">
+                        <div className="sticky top-0 bg-zinc-50/90 backdrop-blur pb-4 mb-4 border-b border-zinc-100 z-10">
+                          <h3 className="text-sm font-bold text-emerald-600 uppercase tracking-wider flex items-center gap-2">
+                            <Languages className="w-4 h-4" /> Translation
+                          </h3>
+                        </div>
+                        {selectedPreviewChapter.translatedContent ? (
+                          <div className="prose prose-sm max-w-none text-zinc-800 whitespace-pre-wrap font-serif leading-relaxed" dir="rtl">
+                            {selectedPreviewChapter.translatedContent}
+                          </div>
+                        ) : (
+                          <div className="flex flex-col items-center justify-center h-64 text-zinc-400 italic">
+                            <Languages className="w-8 h-8 mb-2 opacity-20" />
+                            <p>Not translated yet</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-center h-full text-zinc-400">
+                      <p>Select a chapter to preview</p>
+                    </div>
+                  )}
+                </div>
               </div>
             </motion.div>
           </div>
