@@ -537,6 +537,15 @@ export default function App() {
     setIsTranslating(true);
     stopRequestedRef.current = false;
     addLog("Starting translation process...", "info");
+    
+    let workingKeys = [...keys];
+    
+    // Automatically reset quotaReached status for all keys at the start of a new session
+    if (workingKeys.some(k => k.quotaReached)) {
+      workingKeys = workingKeys.map(k => ({ ...k, quotaReached: false }));
+      await syncKeys(workingKeys);
+      addLog("Automatically reset quota status for all keys.", "info");
+    }
 
     const updatedChapters = [...chapters];
     const chaptersToTranslate = updatedChapters.filter(c => selectedIds.has(c.id));
@@ -552,24 +561,32 @@ export default function App() {
 
       let success = false;
       let attemptCount = 0;
-      const maxAttempts = keys.length * config.selectedModels.length;
+      const maxAttempts = workingKeys.length * config.selectedModels.length;
 
       while (!success && attemptCount < maxAttempts && !stopRequestedRef.current) {
-        const currentKey = keys[currentKeyIndexRef.current];
+        const currentKey = workingKeys[currentKeyIndexRef.current];
         const currentModel = config.selectedModels[currentModelIndexRef.current];
+
+        if (currentKey.quotaReached) {
+          // Skip this key entirely and count all its models as failed attempts
+          attemptCount += config.selectedModels.length;
+          currentKeyIndexRef.current = (currentKeyIndexRef.current + 1) % workingKeys.length;
+          currentModelIndexRef.current = 0; // Reset model index for the new key
+          continue;
+        }
 
         try {
           addLog(`Translating "${updatedChapters[i].title}" using ${currentKey.label} and ${currentModel}...`);
           const { text: translated, tokens } = await translateChapter(updatedChapters[i], currentKey.key, currentModel);
           
           // Update key token usage
-          const updatedKeys = [...keys];
+          workingKeys = [...workingKeys];
           const keyIdx = currentKeyIndexRef.current;
-          updatedKeys[keyIdx] = {
-            ...updatedKeys[keyIdx],
-            tokenUsage: (updatedKeys[keyIdx].tokenUsage || 0) + tokens
+          workingKeys[keyIdx] = {
+            ...workingKeys[keyIdx],
+            tokenUsage: (workingKeys[keyIdx].tokenUsage || 0) + tokens
           };
-          syncKeys(updatedKeys);
+          syncKeys(workingKeys);
 
           updatedChapters[i].translatedContent = translated;
           updatedChapters[i].status = TranslationStatus.COMPLETED;
@@ -599,9 +616,14 @@ export default function App() {
           
           // If we've cycled through all models, rotate key
           if (currentModelIndexRef.current === 0) {
-            currentKeyIndexRef.current = (currentKeyIndexRef.current + 1) % keys.length;
+            // Mark key as quota reached if it failed on all models
+            workingKeys = [...workingKeys];
+            workingKeys[currentKeyIndexRef.current].quotaReached = true;
+            syncKeys(workingKeys);
+
+            currentKeyIndexRef.current = (currentKeyIndexRef.current + 1) % workingKeys.length;
             if (attemptCount < maxAttempts) {
-              addLog(`Cycled through all models. Switching to key: ${keys[currentKeyIndexRef.current].label}`, 'info');
+              addLog(`Cycled through all models. Switching to key: ${workingKeys[currentKeyIndexRef.current].label}`, 'info');
             }
           }
         }
