@@ -24,7 +24,8 @@ async function startServer() {
 
   app.post("/api/auth", (req, res) => {
     const { password } = req.body;
-    if (password === "041994") {
+    console.log(`Auth attempt received. Password length: ${password?.length || 0}`);
+    if (password && password.toString().trim() === "041994") {
       res.json({ success: true });
     } else {
       res.status(401).json({ success: false, message: "Invalid password" });
