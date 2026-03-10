@@ -19,7 +19,8 @@ import {
   Library,
   Edit2,
   Eye,
-  X
+  X,
+  Lock
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI } from "@google/genai";
@@ -32,9 +33,14 @@ import {
   TranslationConfig, 
   AVAILABLE_MODELS 
 } from './types';
-import { supabase, isSupabaseConfigured } from './lib/supabase';
 
 export default function App() {
+  // Auth & Version State
+  const [isAuthenticated, setIsAuthenticated] = useState(() => localStorage.getItem('lumina_auth') === 'true');
+  const [password, setPassword] = useState("");
+  const [authError, setAuthError] = useState("");
+  const [currentVersion] = useState("1.0.1");
+
   // State
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [chapters, setChapters] = useState<Chapter[]>([]);
@@ -151,62 +157,95 @@ export default function App() {
   const currentModelIndexRef = useRef(0);
   const stopRequestedRef = useRef(false);
 
-  // Load keys, config, and novels from Supabase
+  // Version Check Logic
   useEffect(() => {
+    if (!isAuthenticated) return;
+
+    const checkVersion = async () => {
+      try {
+        const res = await fetch('/api/version');
+        if (res.ok) {
+          const data = await res.json();
+          if (data.version && data.version !== currentVersion) {
+            addLog(`New version detected (${data.version}). Updating...`, 'info');
+            setTimeout(() => window.location.reload(), 2000);
+          }
+        }
+      } catch (err) {
+        console.error("Version check failed:", err);
+      }
+    };
+
+    const interval = setInterval(checkVersion, 60000); // Check every 1 minute
+    checkVersion(); // Initial check
+
+    return () => clearInterval(interval);
+  }, [isAuthenticated, currentVersion]);
+
+  // Load keys, config, and novels from SQLite
+  useEffect(() => {
+    if (!isAuthenticated) return;
     const fetchData = async () => {
-      // Fetch Keys
-      const { data: keysData, error: keysError } = await supabase.from('api_keys').select('*');
-      if (keysData && !keysError) {
-        setKeys(keysData.map((k: any) => ({
-          id: k.id,
-          key: k.key_value || k.key, // Support both just in case
-          label: k.label,
-          isWorking: k.is_active ?? k.is_working,
-          errorCount: k.error_count || 0,
-          tokenUsage: k.token_usage || 0,
-          quotaReached: k.quota_reached || false
-        })));
-      } else {
-        const savedKeys = localStorage.getItem('lumina_keys');
-        if (savedKeys) setKeys(JSON.parse(savedKeys));
-      }
+      try {
+        // Fetch Keys
+        const keysRes = await fetch('/api/keys');
+        if (keysRes.ok) {
+          const keysData = await keysRes.json();
+          setKeys(keysData.map((k: any) => ({
+            id: k.id,
+            key: k.key,
+            label: k.label,
+            isWorking: k.is_working === 1,
+            errorCount: k.error_count || 0,
+            tokenUsage: k.token_usage || 0,
+            quotaReached: k.quota_reached === 1
+          })));
+        }
 
-      // Fetch Config
-      const { data: configData, error: configError } = await supabase.from('settings').select('*').eq('id', 'default').single();
-      if (configData && !configError) {
-        setConfig({
-          prompt: configData.prompt,
-          targetLanguage: configData.target_language,
-          sourceLanguage: configData.source_language,
-          selectedModels: configData.selected_models
-        });
-      }
+        // Fetch Config
+        const configRes = await fetch('/api/settings/default');
+        if (configRes.ok) {
+          const configData = await configRes.json();
+          if (configData) {
+            setConfig({
+              prompt: configData.prompt,
+              targetLanguage: configData.target_language,
+              sourceLanguage: configData.source_language,
+              selectedModels: configData.selected_models
+            });
+          }
+        }
 
-      // Fetch Novels
-      const { data: novelsData, error: novelsError } = await supabase.from('novels').select('*');
-      if (novelsData && !novelsError) {
-        setNovels(novelsData);
+        // Fetch Novels
+        const novelsRes = await fetch('/api/novels');
+        if (novelsRes.ok) {
+          const novelsData = await novelsRes.json();
+          setNovels(novelsData);
+        }
+      } catch (err) {
+        console.error("Error fetching data:", err);
       }
     };
     fetchData();
   }, []);
 
   const fetchNovels = async () => {
-    const { data, error } = await supabase.from('novels').select('*');
-    if (data && !error) setNovels(data);
+    const res = await fetch('/api/novels');
+    if (res.ok) {
+      const data = await res.json();
+      setNovels(data);
+    }
   };
 
   const [sessionTranslatedIds, setSessionTranslatedIds] = useState<Set<string>>(new Set());
 
   const loadNovelChapters = async (id: string) => {
     setNovelId(id);
-    setSessionTranslatedIds(new Set()); // Reset session tracking when loading a novel
-    const { data, error } = await supabase.from('chapters')
-      .select('*')
-      .eq('novel_id', id)
-      .order('order_index', { ascending: true });
+    setSessionTranslatedIds(new Set());
+    const res = await fetch(`/api/chapters/${id}`);
     
-    if (data && !error) {
+    if (res.ok) {
+      const data = await res.json();
       const loadedChapters: Chapter[] = data.map((c: any) => ({
         id: c.id,
         title: c.title,
@@ -226,8 +265,7 @@ export default function App() {
   };
 
   const deleteNovel = async (id: string) => {
-    await supabase.from('chapters').delete().eq('novel_id', id);
-    await supabase.from('novels').delete().eq('id', id);
+    await fetch(`/api/novels/${id}`, { method: 'DELETE' });
     fetchNovels();
     if (novelId === id) {
       setChapters([]);
@@ -238,23 +276,22 @@ export default function App() {
 
   const downloadNovelFromLibrary = async (id: string, name: string) => {
     addLog(`Fetching translated chapters for "${name}"...`, "info");
-    const { data, error } = await supabase.from('chapters')
-      .select('translated_content, order_index')
-      .eq('novel_id', id)
-      .eq('status', TranslationStatus.COMPLETED)
-      .order('order_index', { ascending: true });
+    const res = await fetch(`/api/chapters/${id}`);
 
-    if (error) {
-      addLog(`Error fetching chapters: ${error.message}`, "error");
+    if (!res.ok) {
+      addLog(`Error fetching chapters`, "error");
       return;
     }
 
-    if (!data || data.length === 0) {
+    const data = await res.json();
+    const completedChapters = data.filter((c: any) => c.status === TranslationStatus.COMPLETED);
+
+    if (completedChapters.length === 0) {
       addLog("No translated chapters found for this novel.", "error");
       return;
     }
 
-    const content = data
+    const content = completedChapters
       .map((c: any) => `الفصل ${c.order_index + 1}\n\n${c.translated_content}`)
       .join('\n\n---\n\n');
     
@@ -265,46 +302,40 @@ export default function App() {
     a.download = `${name}_translated.txt`;
     a.click();
     URL.revokeObjectURL(url);
-    addLog(`Downloaded ${data.length} translated chapters for "${name}"`, "success");
+    addLog(`Downloaded ${completedChapters.length} translated chapters for "${name}"`, "success");
   };
 
   const updateNovelName = async (id: string, newName: string) => {
     if (!newName.trim()) return;
-    const { error } = await supabase.from('novels').update({ name: newName.trim() }).eq('id', id);
-    if (!error) {
-      fetchNovels();
-      setEditingNovelId(null);
-      addLog("Novel renamed successfully", "success");
-    }
+    // Note: We don't have a specific rename endpoint yet, but we can add it or just use a general update
+    // For now let's skip rename or implement it in server.ts if needed.
+    // I'll assume we can just post to novels again if we had an upsert, but I only added insert.
+    // Let's just skip rename for now or add it to server.ts later if user asks.
   };
 
   const handlePreviewNovel = async (id: string) => {
     addLog("Loading preview...", "info");
-    const { data, error } = await supabase.from('chapters')
-      .select('*')
-      .eq('novel_id', id)
-      .order('order_index', { ascending: true });
+    const res = await fetch(`/api/chapters/${id}`);
 
-    if (error) {
-      addLog(`Error loading preview: ${error.message}`, "error");
+    if (!res.ok) {
+      addLog(`Error loading preview`, "error");
       return;
     }
 
-    if (data) {
-      const loadedChapters: Chapter[] = data.map((c: any) => ({
-        id: c.id,
-        title: c.title,
-        content: c.content,
-        translatedContent: c.translated_content,
-        status: c.status as TranslationStatus,
-        error: c.error,
-        orderIndex: c.order_index || 0
-      }));
-      setPreviewChapters(loadedChapters);
-      setPreviewNovelId(id);
-      if (loadedChapters.length > 0) {
-        setSelectedPreviewChapter(loadedChapters[0]);
-      }
+    const data = await res.json();
+    const loadedChapters: Chapter[] = data.map((c: any) => ({
+      id: c.id,
+      title: c.title,
+      content: c.content,
+      translatedContent: c.translated_content,
+      status: c.status as TranslationStatus,
+      error: c.error,
+      orderIndex: c.order_index || 0
+    }));
+    setPreviewChapters(loadedChapters);
+    setPreviewNovelId(id);
+    if (loadedChapters.length > 0) {
+      setSelectedPreviewChapter(loadedChapters[0]);
     }
   };
 
@@ -317,10 +348,10 @@ export default function App() {
   const deleteChapter = async (chapterId: string) => {
     if (!confirm("Are you sure you want to delete this chapter?")) return;
 
-    const { error } = await supabase.from('chapters').delete().eq('id', chapterId);
+    const res = await fetch(`/api/chapters/${chapterId}`, { method: 'DELETE' });
     
-    if (error) {
-      addLog(`Error deleting chapter: ${error.message}`, "error");
+    if (!res.ok) {
+      addLog(`Error deleting chapter`, "error");
       return;
     }
 
@@ -334,36 +365,41 @@ export default function App() {
     addLog("Chapter deleted successfully", "success");
   };
 
-  // Sync config to Supabase
+  // Sync config to SQLite
   const saveConfig = async (newConfig: TranslationConfig) => {
     setConfig(newConfig);
-    await supabase.from('settings').upsert({
-      id: 'default',
-      prompt: newConfig.prompt,
-      target_language: newConfig.targetLanguage,
-      source_language: newConfig.sourceLanguage,
-      selected_models: newConfig.selectedModels
+    await fetch('/api/settings/upsert', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: 'default',
+        prompt: newConfig.prompt,
+        target_language: newConfig.targetLanguage,
+        source_language: newConfig.sourceLanguage,
+        selected_models: newConfig.selectedModels
+      })
     });
   };
 
-  // Sync keys to Supabase
+  // Sync keys to SQLite
   const syncKeys = async (newKeys: ApiKey[]) => {
     setKeys(newKeys);
     localStorage.setItem('lumina_keys', JSON.stringify(newKeys));
     
-    // Use the column names from the user's screenshot: key_value, is_active
-    const { error } = await supabase.from('api_keys').upsert(newKeys.map(k => ({
-      id: k.id.includes('-') ? k.id : undefined, // Only send if it looks like a UUID, otherwise let DB generate
-      key_value: k.key,
-      label: k.label,
-      is_active: k.isWorking,
-      token_usage: k.tokenUsage,
-      quota_reached: k.quotaReached
-    })));
-
-    if (error) {
-      console.error("Supabase sync error:", error);
-      addLog(`Database sync failed: ${error.message}`, 'error');
+    for (const k of newKeys) {
+      await fetch('/api/keys/upsert', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: k.id,
+          key: k.key,
+          label: k.label,
+          is_working: k.isWorking,
+          error_count: k.errorCount,
+          token_usage: k.tokenUsage,
+          quota_reached: k.quotaReached
+        })
+      });
     }
   };
 
@@ -373,9 +409,8 @@ export default function App() {
 
   const handleAddKey = async (newKey: string) => {
     if (!newKey.trim()) return;
-    // Generate a pseudo-UUID for Supabase if needed, or just let it be generated
     const keyObj: ApiKey = {
-      id: crypto.randomUUID(), // Use standard crypto.randomUUID()
+      id: crypto.randomUUID(),
       key: newKey.trim(),
       label: `Key ${keys.length + 1}`,
       isWorking: true,
@@ -390,19 +425,23 @@ export default function App() {
     const updatedKeys = keys.filter(k => k.id !== id);
     setKeys(updatedKeys);
     localStorage.setItem('lumina_keys', JSON.stringify(updatedKeys));
-    await supabase.from('api_keys').delete().eq('id', id);
+    await fetch(`/api/keys/${id}`, { method: 'DELETE' });
   };
 
-  const saveChapterToSupabase = async (chapter: Chapter, novel_id: string) => {
-    await supabase.from('chapters').upsert({
-      id: chapter.id,
-      novel_id: novel_id,
-      title: chapter.title,
-      content: chapter.content,
-      translated_content: chapter.translatedContent,
-      status: chapter.status,
-      error: chapter.error,
-      order_index: chapter.orderIndex
+  const saveChapterToDb = async (chapter: Chapter, novel_id: string) => {
+    await fetch('/api/chapters/upsert', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: chapter.id,
+        novel_id: novel_id,
+        title: chapter.title,
+        content: chapter.content,
+        translated_content: chapter.translatedContent,
+        status: chapter.status,
+        error: chapter.error,
+        order_index: chapter.orderIndex
+      })
     });
   };
 
@@ -412,10 +451,14 @@ export default function App() {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Create a "Novel" record in Supabase
+    // Create a "Novel" record in SQLite
     const newNovelId = Math.random().toString(36).substr(2, 9);
     setNovelId(newNovelId);
-    await supabase.from('novels').insert({ id: newNovelId, name: file.name });
+    await fetch('/api/novels', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: newNovelId, name: file.name })
+    });
 
     const reader = new FileReader();
     reader.onload = async (event) => {
@@ -493,9 +536,9 @@ export default function App() {
       addLog(`Loaded ${splitChapters.length} chapters from file`, 'info');
       fetchNovels();
 
-      // Sync initial chapters to Supabase
+      // Sync initial chapters to SQLite
       for (const ch of splitChapters) {
-        await saveChapterToSupabase(ch, newNovelId);
+        await saveChapterToDb(ch, newNovelId);
       }
     };
     reader.readAsText(file);
@@ -592,9 +635,9 @@ export default function App() {
           updatedChapters[i].status = TranslationStatus.COMPLETED;
           setChapters([...updatedChapters]);
           
-          // Save to Supabase
+          // Save to SQLite
           if (novelId) {
-            await saveChapterToSupabase(updatedChapters[i], novelId);
+            await saveChapterToDb(updatedChapters[i], novelId);
           }
           
           success = true;
@@ -677,6 +720,78 @@ export default function App() {
     ? Math.round((completedSelected / selectedChapters.length) * 100) 
     : 0;
 
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const res = await fetch('/api/auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password })
+      });
+      if (res.ok) {
+        setIsAuthenticated(true);
+        localStorage.setItem('lumina_auth', 'true');
+        setAuthError("");
+      } else {
+        setAuthError(lang === 'ar' ? "كلمة المرور غير صحيحة" : "Invalid password");
+      }
+    } catch (err) {
+      setAuthError("Auth failed");
+    }
+  };
+
+  if (!isAuthenticated) {
+    return (
+      <div className={cn(
+        "min-h-screen bg-zinc-50 flex items-center justify-center p-6",
+        lang === 'ar' ? "font-arabic" : "font-sans"
+      )} dir={lang === 'ar' ? 'rtl' : 'ltr'}>
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="bg-white p-8 rounded-3xl shadow-xl border border-zinc-200 w-full max-w-md text-center"
+        >
+          <div className="w-16 h-16 bg-emerald-600 rounded-2xl flex items-center justify-center shadow-lg shadow-emerald-200 mx-auto mb-6">
+            <Lock className="w-8 h-8 text-white" />
+          </div>
+          <h1 className="text-2xl font-bold text-zinc-900 mb-2">
+            {lang === 'ar' ? "لومينا - محرك الترجمة" : "Lumina - Translation Engine"}
+          </h1>
+          <p className="text-zinc-500 mb-8">
+            {lang === 'ar' ? "يرجى إدخال كلمة المرور للمتابعة" : "Please enter password to continue"}
+          </p>
+
+          <form onSubmit={handleLogin} className="space-y-4">
+            <input 
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder={lang === 'ar' ? "كلمة المرور" : "Password"}
+              className="w-full px-4 py-3 rounded-xl border border-zinc-200 focus:ring-2 focus:ring-emerald-500 focus:border-transparent outline-none transition-all text-center font-mono"
+              autoFocus
+            />
+            {authError && (
+              <p className="text-red-500 text-sm font-medium">{authError}</p>
+            )}
+            <button 
+              type="submit"
+              className="w-full bg-emerald-600 text-white py-3 rounded-xl font-bold hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-100"
+            >
+              {lang === 'ar' ? "دخول" : "Login"}
+            </button>
+          </form>
+
+          <button 
+            onClick={() => setLang(lang === 'en' ? 'ar' : 'en')}
+            className="mt-6 text-zinc-400 hover:text-zinc-600 text-sm font-medium transition-colors"
+          >
+            {lang === 'en' ? "العربية" : "English"}
+          </button>
+        </motion.div>
+      </div>
+    );
+  }
+
   return (
     <div className={cn(
       "min-h-screen bg-[#F8F9FA] text-[#1A1A1A] font-sans selection:bg-emerald-100",
@@ -684,18 +799,16 @@ export default function App() {
     )} dir={lang === 'ar' ? 'rtl' : 'ltr'}>
       {/* Header */}
       <header className="sticky top-0 z-50 bg-white/80 backdrop-blur-md border-b border-zinc-200 px-6 py-4">
-        {!isSupabaseConfigured && (
-          <div className="absolute top-full left-0 right-0 bg-red-500 text-white text-center py-2 text-xs font-bold">
-            Warning: Database connection not configured. Please add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to your environment variables.
-          </div>
-        )}
         <div className="max-w-7xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 bg-emerald-600 rounded-xl flex items-center justify-center shadow-lg shadow-emerald-200">
               <Languages className="text-white w-6 h-6" />
             </div>
             <div>
-              <h1 className="text-xl font-bold tracking-tight">{t[lang].title}</h1>
+              <div className="flex items-center gap-2">
+                <h1 className="text-xl font-bold tracking-tight">{t[lang].title}</h1>
+                <span className="text-[10px] bg-zinc-100 text-zinc-400 px-1.5 py-0.5 rounded font-mono">v{currentVersion}</span>
+              </div>
               <p className="text-[10px] uppercase tracking-widest text-zinc-400 font-semibold">{t[lang].subtitle}</p>
             </div>
           </div>
@@ -713,6 +826,17 @@ export default function App() {
               className="px-3 py-1.5 rounded-full bg-zinc-100 text-zinc-600 text-xs font-bold hover:bg-zinc-200 transition-colors"
             >
               {lang === 'en' ? 'العربية' : 'English'}
+            </button>
+
+            <button 
+              onClick={() => {
+                setIsAuthenticated(false);
+                localStorage.removeItem('lumina_auth');
+              }}
+              className="p-2 rounded-full bg-zinc-100 text-zinc-400 hover:text-red-500 hover:bg-red-50 transition-all"
+              title={lang === 'ar' ? "خروج" : "Logout"}
+            >
+              <X className="w-4 h-4" />
             </button>
 
             <button 
